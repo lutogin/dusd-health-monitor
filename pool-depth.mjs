@@ -328,6 +328,12 @@ async function readInitializedTicks(rpc, state, tickLow, tickHigh) {
 // ----------------------------------------------------------------- report
 
 function analyse(state, liquidityNet, bandPercent) {
+  if (state.token1.symbol !== 'DUSD') {
+    throw new Error(
+      `expected DUSD as token1, got ${state.token1.symbol}/${state.token0.symbol} — ` +
+      `price inversion and supply reporting assume this ordering`,
+    );
+  }
   const scale0 = 10 ** state.token0.decimals;
   const scale1 = 10 ** state.token1.decimals;
 
@@ -406,7 +412,7 @@ function printReport(report, state) {
     `\n  ${s1} total supply: ${report.dusdTotalSupply.toLocaleString('en-US', { maximumFractionDigits: 0 })}`,
   );
   console.log(
-    `  depth as share of supply: ${((100 * report.depth.sellToken0) / report.dusdTotalSupply).toFixed(3)}%\n`,
+    `  depth as share of supply: ${((100 * report.depth.buyToken0) / report.dusdTotalSupply).toFixed(3)}%\n`,
   );
 }
 
