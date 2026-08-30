@@ -1,0 +1,20 @@
+{
+  "name": "dusd-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Liquidity monitor for the StandX DUSD/USDT PancakeSwap V3 pool on BSC",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "start": "node src/index.mjs",
+    "once": "node src/index.mjs --once",
+    "tail": "node src/index.mjs --once --tail",
+    "dry": "node src/index.mjs --once --dry-run",
+    "test": "node --test src/*.test.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5"
+  }
+}
