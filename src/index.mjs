@@ -153,6 +153,8 @@ async function main() {
   process.on('SIGINT', () => stop('SIGINT'));
   process.on('SIGTERM', () => stop('SIGTERM'));
 
+  sendMessage(config.telegram, `🟢 <b>dusd-monitor started</b>`);
+
   while (!stopping) {
     const now = new Date();
     const today = now.toISOString().slice(0, 10);
