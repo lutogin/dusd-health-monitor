@@ -75,7 +75,9 @@ retried on the next cycle rather than lost.
 
 ## history.json
 
-Written atomically (temp file + rename). Structure:
+Written atomically (unique temp file + rename). Complete read/modify/write cycles
+are protected by a cross-process lock, so overlapping daemon, cron, and manual
+runs cannot corrupt or silently overwrite one another's state. Structure:
 
 ```jsonc
 {

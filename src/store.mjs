@@ -1,7 +1,13 @@
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { open, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 
 const SCHEMA_VERSION = 1;
+const LOCK_RETRY_MS = 100;
+const LOCK_TIMEOUT_MS = 10 * 60_000;
+const INCOMPLETE_LOCK_GRACE_MS = 30_000;
+
+const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 const emptyHistory = () => ({
   version: SCHEMA_VERSION,
@@ -38,12 +44,125 @@ export async function loadHistory(path) {
   }
 }
 
-/** Writes via a temp file + rename so a crash mid-write cannot truncate history. */
+/**
+ * Writes via a per-invocation temp file + rename so a crash mid-write cannot
+ * truncate history and concurrent writers cannot consume one another's temp file.
+ */
 export async function saveHistory(path, history) {
-  const tmpPath = `${path}.tmp`;
-  await writeFile(tmpPath, `${JSON.stringify(history, null, 2)}\n`, 'utf8');
-  await rename(tmpPath, path);
-  return dirname(path);
+  const tmpPath = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmpPath, `${JSON.stringify(history, null, 2)}\n`, 'utf8');
+    await rename(tmpPath, path);
+    return dirname(path);
+  } finally {
+    await unlink(tmpPath).catch((error) => {
+      if (error.code !== 'ENOENT') throw error;
+    });
+  }
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    // EPERM still means the process exists; unknown errors should not let us
+    // steal a lock from a potentially live owner.
+    return true;
+  }
+}
+
+async function removeAbandonedLock(lockPath) {
+  let raw;
+  try {
+    raw = await readFile(lockPath, 'utf8');
+  } catch (error) {
+    if (error.code === 'ENOENT') return true;
+    throw error;
+  }
+
+  let owner;
+  try {
+    owner = JSON.parse(raw);
+  } catch {
+    // A new owner may have created the file but not written its metadata yet.
+    const lockStat = await stat(lockPath).catch((error) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (!lockStat || Date.now() - lockStat.mtimeMs < INCOMPLETE_LOCK_GRACE_MS) return false;
+  }
+
+  if (Number.isInteger(owner?.pid) && processIsAlive(owner.pid)) return false;
+
+  // Re-read before unlinking so a newly acquired lock is not removed after we
+  // inspected an abandoned one.
+  const current = await readFile(lockPath, 'utf8').catch((error) => {
+    if (error.code === 'ENOENT') return null;
+    throw error;
+  });
+  if (current !== raw) return false;
+
+  await unlink(lockPath).catch((error) => {
+    if (error.code !== 'ENOENT') throw error;
+  });
+  return true;
+}
+
+/**
+ * Serializes the complete history read/modify/write transaction across monitor
+ * processes. This also keeps alert cooldown checks and Telegram delivery from
+ * being duplicated when cron, a daemon, or a manual run overlap.
+ */
+export async function withHistoryLock(
+  path,
+  operation,
+  { retryMs = LOCK_RETRY_MS, timeoutMs = LOCK_TIMEOUT_MS } = {},
+) {
+  const lockPath = `${path}.lock`;
+  const token = randomUUID();
+  const owner = `${JSON.stringify({ pid: process.pid, token, startedAt: new Date().toISOString() })}\n`;
+  const waitStartedAt = Date.now();
+
+  while (true) {
+    let handle;
+    try {
+      handle = await open(lockPath, 'wx');
+      await handle.writeFile(owner, 'utf8');
+      await handle.close();
+      break;
+    } catch (error) {
+      const createdLock = Boolean(handle);
+      await handle?.close().catch(() => {});
+      if (createdLock) {
+        await unlink(lockPath).catch((unlinkError) => {
+          if (unlinkError.code !== 'ENOENT') throw unlinkError;
+        });
+      }
+      if (error.code !== 'EEXIST') throw error;
+
+      if (await removeAbandonedLock(lockPath)) continue;
+      if (Date.now() - waitStartedAt >= timeoutMs) {
+        throw new Error(`timed out waiting for history lock ${lockPath}`);
+      }
+      await sleep(retryMs);
+    }
+  }
+
+  try {
+    return await operation();
+  } finally {
+    const current = await readFile(lockPath, 'utf8').catch((error) => {
+      if (error.code === 'ENOENT') return null;
+      throw error;
+    });
+    if (current === owner) {
+      await unlink(lockPath).catch((error) => {
+        if (error.code !== 'ENOENT') throw error;
+      });
+    }
+  }
 }
 
 export function appendSample(history, sample) {

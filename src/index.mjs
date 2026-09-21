@@ -6,6 +6,7 @@ import {
   pruneHistory,
   recordDaily,
   saveHistory,
+  withHistoryLock,
 } from './store.mjs';
 import { SEVERITY, applyCooldown, evaluateRules, evaluateTail } from './rules.mjs';
 import { formatAlerts, sendMessage } from './telegram.mjs';
@@ -17,6 +18,10 @@ const sleep = (ms) => new Promise((done) => setTimeout(done, ms));
 
 /** Runs one full measurement cycle. Returns the alerts that were dispatched. */
 async function runCycle(config, { includeTail }) {
+  return withHistoryLock(config.historyPath, () => runCycleLocked(config, { includeTail }));
+}
+
+async function runCycleLocked(config, { includeTail }) {
   const now = new Date();
   const history = await loadHistory(config.historyPath);
 
@@ -90,26 +95,28 @@ async function reportProbeFailure(config, error, consecutiveFailures) {
   log(`probe failed (${consecutiveFailures} in a row): ${error.message}`);
   if (consecutiveFailures !== CONSECUTIVE_FAILURES_BEFORE_ALERT) return;
 
-  const history = await loadHistory(config.historyPath);
-  const now = new Date();
-  const dispatched = applyCooldown(
-    [
-      {
-        id: 'probe_failure',
-        severity: SEVERITY.WARNING,
-        title: 'Pool monitor is blind',
-        detail: `${consecutiveFailures} consecutive probe failures. Last error: ${error.message}`,
-      },
-    ],
-    history.alerts,
-    now,
-    config.alertCooldownMinutes,
-  );
+  await withHistoryLock(config.historyPath, async () => {
+    const history = await loadHistory(config.historyPath);
+    const now = new Date();
+    const dispatched = applyCooldown(
+      [
+        {
+          id: 'probe_failure',
+          severity: SEVERITY.WARNING,
+          title: 'Pool monitor is blind',
+          detail: `${consecutiveFailures} consecutive probe failures. Last error: ${error.message}`,
+        },
+      ],
+      history.alerts,
+      now,
+      config.alertCooldownMinutes,
+    );
 
-  if (dispatched.length > 0) {
-    await sendMessage(config.telegram, `🟠 <b>${dispatched[0].title}</b>\n${dispatched[0].detail}`);
-    await saveHistory(config.historyPath, history);
-  }
+    if (dispatched.length > 0) {
+      await sendMessage(config.telegram, `🟠 <b>${dispatched[0].title}</b>\n${dispatched[0].detail}`);
+      await saveHistory(config.historyPath, history);
+    }
+  });
 }
 
 function parseArgs(argv) {
